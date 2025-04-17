@@ -1,0 +1,24 @@
+# main.py
+
+from bot.login import login
+from bot.message_sender import MessageHandler
+from bot.hashtag_scraper import get_users_by_hashtag  # Fixed import name
+from bot.utils import random_delay
+
+async def main():
+    client = login()
+    if not client:
+        return
+
+    message_handler = MessageHandler(client)
+    
+    # Target users from hashtags
+    target_hashtags = ["sidehustle", "makemoney", "entrepreneurship"]
+    for hashtag in target_hashtags:
+        users = await get_users_by_hashtag(client, hashtag)
+        for username in users[:5]:  # Limit to 5 users per hashtag
+            await message_handler.handle_conversation(username, hashtag)
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
