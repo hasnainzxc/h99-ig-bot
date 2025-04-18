@@ -44,7 +44,7 @@ class MessageHandler:
     async def send_direct_message_with_retry(self, user_ids, text, max_retries: int = 3):
         for attempt in range(max_retries):
             try:
-                await random_delay(2 * (attempt + 1), 10 * (attempt + 1))
+                await random_delay(5 * (attempt + 1), 10 * (attempt + 1))
                 return self.client.direct_send(text=text, user_ids=user_ids)
             except Exception as e:
                 logger.warning(f"Message send attempt {attempt + 1}/{max_retries} failed: {e}")
