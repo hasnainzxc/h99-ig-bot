@@ -91,34 +91,40 @@ class MessageHandler:
                 delay = self.base_delay * (1.5 ** attempt)  # Less aggressive backoff
                 await random_delay(delay, delay * 1.2)
                 
-                # Try v1 API first for certain endpoints
-                if endpoint == 'user_info':
-                    try:
-                        result = self.client.user_info_v1(args[0])
-                    except:
-                        result = func(*args, **kwargs)
-                else:
+                # Try to execute the API call
+                try:
                     result = func(*args, **kwargs)
-                
-                self.request_count += 1
-                return result
-                
-            except Exception as e:
-                error_msg = str(e).lower()
-                
-                if any(err in error_msg for err in ['500', 'jsondecodeerror']):
-                    logger.warning(f"API error ({endpoint}), attempt {attempt + 1}/{self.retry_count}")
-                    await random_delay(delay * 2, delay * 2.5)
-                elif '429' in error_msg or 'too many requests' in error_msg:
-                    logger.warning(f"Rate limit hit for {endpoint}, cooling down...")
-                    await random_delay(600, 900)  # 10-15 minute cooldown
-                    self._reset_limits(endpoint)
-                else:
-                    if attempt == self.retry_count - 1:
-                        logger.error(f"Final attempt failed for {endpoint}: {e}")
-                        raise
+                    self.request_count += 1
+                    return result
+                except Exception as api_error:
+                    error_msg = str(api_error).lower()
                     
-                await random_delay(delay, delay * 1.5)
+                    # Handle specific API errors
+                    if '429' in error_msg or 'too many requests' in error_msg:
+                        logger.warning(f"Rate limit hit for {endpoint}, implementing cooldown...")
+                        self._reset_limits(endpoint)  # Reset limits for this endpoint
+                        await random_delay(300, 600)  # 5-10 minute cooldown
+                        continue
+                        
+                    elif 'unauthorized' in error_msg or 'login' in error_msg:
+                        logger.warning(f"Authorization error for {endpoint}, might need to re-login")
+                        # Let it fall through to the outer exception handler
+                        raise
+                        
+                    elif '500' in error_msg or 'jsondecodeerror' in error_msg:
+                        if attempt < self.retry_count - 1:
+                            logger.warning(f"Temporary API error ({endpoint}), attempt {attempt + 1}/{self.retry_count}")
+                            await random_delay(delay * 2, delay * 2.5)
+                            continue
+                    
+                    raise  # Re-raise if we can't handle it specifically
+                    
+            except Exception as e:
+                if attempt == self.retry_count - 1:
+                    logger.error(f"All attempts failed for {endpoint}: {e}")
+                    raise
+                
+                await random_delay(delay * 2, delay * 3)
                 continue
                 
         return None
@@ -310,14 +316,29 @@ class MessageHandler:
             thread = await self.send_message(user_info.pk, initial_msg, username)
             if not thread:
                 return False
+
+            # Extract thread ID properly, handling different response structures
+            thread_id = None
+            if hasattr(thread, 'thread_id'):
+                thread_id = thread.thread_id
+            elif hasattr(thread, 'id'):
+                thread_id = thread.id
+            else:
+                # If thread is a dict or has different structure
+                thread_id = str(thread).split('/')[-1] if str(thread).find('/') != -1 else str(thread)
+            
+            logger.info(f"Created thread {thread_id} with {username}")
             
             # Wait for reply with increased timeout
-            if await self.wait_for_reply(getattr(thread, 'id', None), username, timeout_minutes=45):
+            if await self.wait_for_reply(thread_id, username, timeout_minutes=45):
+                # Add delay before follow-up to appear more natural
+                await random_delay(10, 20)
                 amount = random.randint(50, 150)
                 follow_up = self.messages['follow_up'].format(amount=amount)
                 await self.send_message(user_info.pk, follow_up, username)
                 
-                if await self.wait_for_reply(getattr(thread, 'id', None), username, timeout_minutes=45):
+                if await self.wait_for_reply(thread_id, username, timeout_minutes=45):
+                    await random_delay(10, 20)
                     final = self.messages['final'].format(link="https://your-app-link.com")
                     await self.send_message(user_info.pk, final, username)
                     return True
