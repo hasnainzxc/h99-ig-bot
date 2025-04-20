@@ -4,7 +4,7 @@ from datetime import datetime
 import time
 from bot.utils import random_delay
 from bot.selenium_handler import SeleniumHandler
-from bot.config import username, password  # Changed to lowercase
+from bot.config import USERNAME, PASSWORD
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class MessageHandler:
 
     async def _init_selenium_if_needed(self):
         if not self.selenium_handler:
-            self.selenium_handler = SeleniumHandler(username, password)  # Changed to lowercase
+            self.selenium_handler = SeleniumHandler(USERNAME, PASSWORD)
             await self.selenium_handler.login()
 
     def _check_rate_limit(self):
@@ -179,50 +179,20 @@ class MessageHandler:
 
     async def get_user_info(self, username):
         try:
-            # Try public API first
-            try:
-                result = await self.handle_api_request(
-                    lambda: self.client.user_info_by_username(username),
-                    'user_info'
-                )
-                if result:
-                    return result
-            except Exception as e:
-                error_msg = str(e).lower()
-                if '404' in error_msg or 'not exist' in error_msg:
-                    logger.info(f"User {username} does not exist")
-                    return None
-                logger.warning(f"Public API failed: {e}")
-
-            # Try user ID lookup only if it wasn't a 404
-            try:
-                user_id = await self.handle_api_request(
-                    lambda: self.client.user_id_from_username(username),
-                    'user_info'
-                )
-                if user_id:
-                    result = await self.handle_api_request(
-                        lambda: self.client.user_info(user_id),
-                        'user_info'
-                    )
+            # Try different methods to get user info
+            methods = [
+                lambda: self.client.user_info_v1(username),
+                lambda: self.client.user_info_by_username_v1(username),
+                lambda: self.client.user_info_by_username(username)
+            ]
+            
+            for method in methods:
+                try:
+                    result = await self.handle_api_request(method, 'user_info')
                     if result:
                         return result
-            except Exception as e:
-                error_msg = str(e).lower()
-                if '404' in error_msg or 'not exist' in error_msg:
-                    logger.info(f"User {username} does not exist")
-                    return None
-                logger.warning(f"User ID lookup failed: {e}")
-
-            # Fall back to Selenium for user info only if previous errors weren't 404s
-            logger.info("Falling back to Selenium for user info")
-            await self._init_selenium_if_needed()
-            if await self.selenium_handler.check_user_exists(username):
-                return type('User', (), {
-                    'pk': 0,  # Placeholder ID
-                    'username': username,
-                    'full_name': username,
-                })
+                except:
+                    continue
             
             return None
             
@@ -231,68 +201,52 @@ class MessageHandler:
             return None
 
     async def wait_for_reply(self, thread_id, username, timeout_minutes=30):
-        logger.info(f"Waiting for reply from {username} (timeout: {timeout_minutes} minutes)")
+        logger.info(f"Waiting for reply (timeout: {timeout_minutes} minutes)")
         start_time = datetime.now()
         check_interval = 45
         max_interval = 600
-        max_retries = 3
         
-        message_cache = set()  # Changed to set for simpler duplicate checking
+        message_cache = {}
         using_selenium = False
         
         while (datetime.now() - start_time).total_seconds() < (timeout_minutes * 60):
             try:
                 if not using_selenium:
-                    # Try API with retries
-                    for attempt in range(max_retries):
-                        try:
-                            messages = await self.handle_api_request(
-                                lambda: self.client.direct_messages(thread_id),
-                                'direct_messages'
-                            )
-                            
-                            if messages:
-                                # Process messages newest to oldest
-                                for message in reversed(messages):
-                                    message_id = str(message.id)  # Convert to string for consistency
-                                    if (message.user_id != self.client.user_id and 
-                                        message_id not in message_cache and
-                                        message_id not in self.processed_messages):
-                                        
-                                        logger.info(f"Got reply via API from {username}: '{message.text[:30]}...'")
-                                        message_cache.add(message_id)
-                                        self.processed_messages.add(message_id)
-                                        return True
-                            break  # Success, exit retry loop
-                            
-                        except Exception as e:
-                            if attempt == max_retries - 1:
-                                logger.warning(f"API check failed after {max_retries} attempts, switching to Selenium")
-                                using_selenium = True
-                            else:
-                                await random_delay(check_interval * (attempt + 1), check_interval * (attempt + 1.5))
-                                continue
-                
-                if using_selenium:
-                    # Selenium fallback
+                    # Try API first
+                    messages = await self.handle_api_request(
+                        lambda: self.client.direct_messages(thread_id),
+                        'direct_messages'
+                    )
+                    
+                    if messages:
+                        for message in messages:
+                            if (message.user_id != self.client.user_id and 
+                                message.id not in self.processed_messages and
+                                message.id not in message_cache):
+                                
+                                self.processed_messages.add(message.id)
+                                message_cache[message.id] = message
+                                logger.info(f"Got reply via API: '{message.text[:30]}...'")
+                                return True
+                else:
+                    # Use Selenium fallback
                     await self._init_selenium_if_needed()
                     if await self.selenium_handler.check_for_replies(username):
-                        logger.info(f"Got reply from {username} via Selenium")
+                        logger.info("Got reply via Selenium")
                         return True
                 
-                # Adaptive delay between checks
                 await random_delay(check_interval, check_interval * 1.2)
                 check_interval = min(check_interval * 1.2, max_interval)
                 
             except Exception as e:
                 logger.warning(f"Error checking replies: {e}")
                 if not using_selenium:
-                    logger.info("Error with API, switching to Selenium for reply checking")
+                    logger.info("Switching to Selenium for reply checking")
                     using_selenium = True
                 check_interval = min(check_interval * 1.5, max_interval)
                 await random_delay(check_interval, check_interval * 1.5)
         
-        logger.info(f"No reply received from {username} within {timeout_minutes} minutes timeout")
+        logger.info("No reply received within timeout")
         return False
 
     async def handle_conversation(self, username: str, topic: str):
